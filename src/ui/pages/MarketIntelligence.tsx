@@ -182,6 +182,19 @@ function ZoneHeatMap({
 
       mapRef.current.on("load", () => {
         setMapLoaded(true);
+        try {
+          // Ensure panning works even on browsers with weird defaults.
+          mapRef.current?.dragPan?.enable?.();
+          mapRef.current?.boxZoom?.enable?.();
+          mapRef.current?.doubleClickZoom?.enable?.();
+          mapRef.current?.scrollZoom?.enable?.();
+          mapRef.current?.keyboard?.enable?.();
+          mapRef.current?.touchZoomRotate?.enable?.();
+          mapRef.current?.touchZoomRotate?.disableRotation?.();
+          mapRef.current?.dragRotate?.disable?.();
+        } catch {
+          // ignore
+        }
         // Force resize after first paint (common when containers are flex/grid)
         setTimeout(() => {
           try {
@@ -275,6 +288,26 @@ function ZoneHeatMap({
       }
     };
 
+    // Hover "as requested": show tooltip when hovering the map near a point (not pixel-perfect).
+    const onMapMove = (e: any) => {
+      try {
+        const buffer = 10;
+        const p = e.point;
+        const bbox: [[number, number], [number, number]] = [
+          [p.x - buffer, p.y - buffer],
+          [p.x + buffer, p.y + buffer]
+        ];
+        const feats = map.queryRenderedFeatures(bbox, { layers: [pointsLayerId] }) || [];
+        if (!feats.length) {
+          onLeave();
+          return;
+        }
+        onMove({ ...e, features: feats });
+      } catch {
+        // ignore
+      }
+    };
+
     function upsert() {
       setOverlayReady(false);
       if (!map.getSource(sourceId)) {
@@ -319,7 +352,7 @@ function ZoneHeatMap({
           type: "circle",
           source: sourceId,
           paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3, 14, 6],
             "circle-color": [
               "interpolate",
               ["linear"],
@@ -344,11 +377,13 @@ function ZoneHeatMap({
       try {
         map.off("mousemove", pointsLayerId, onMove);
         map.off("mouseleave", pointsLayerId, onLeave);
+        map.off("mousemove", onMapMove);
       } catch {
         // ignore
       }
       map.on("mousemove", pointsLayerId, onMove);
       map.on("mouseleave", pointsLayerId, onLeave);
+      map.on("mousemove", onMapMove);
       setOverlayReady(true);
     }
 
@@ -359,6 +394,7 @@ function ZoneHeatMap({
       try {
         map.off("mousemove", pointsLayerId, onMove);
         map.off("mouseleave", pointsLayerId, onLeave);
+        map.off("mousemove", onMapMove);
       } catch {
         // ignore
       }
@@ -420,7 +456,8 @@ function ZoneHeatMap({
           position: "absolute",
           inset: 0,
           zIndex: 0,
-          isolation: "isolate"
+          isolation: "isolate",
+          touchAction: "none"
         }}
       />
       <Box
