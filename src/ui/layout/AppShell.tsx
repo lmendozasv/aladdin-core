@@ -131,6 +131,7 @@ export default function AppShell({ title, children }: PropsWithChildren<{ title:
           >
             <MenuIcon />
           </IconButton>
+          
           {/* {isDesktop ? (
             <Typography variant="caption" color="text.secondary" sx={{ display: { xs: "none", md: "block" } }}>
               {collapsed ? "Collapsed" : "Expanded"}
