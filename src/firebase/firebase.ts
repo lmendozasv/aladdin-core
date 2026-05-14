@@ -13,7 +13,8 @@ type FirebaseConfig = {
 };
 
 function readEnv(k: string): string {
-  return String((import.meta as any)?.env?.[k] ?? "").trim();
+  // Vite injects env vars at build time under import.meta.env.
+  return String((import.meta as any).env?.[k] ?? "").trim();
 }
 
 export const firebaseConfigErrors: string[] = [];
@@ -79,6 +80,16 @@ export const firebaseConfigured = !!firebaseConfig;
 
 export const firebaseApp = firebaseConfig ? initializeApp(firebaseConfig) : null;
 export const firebaseAuth = firebaseApp ? getAuth(firebaseApp) : null;
+
+// Dev-only diagnostics: helps detect when Vite is not loading `.env`.
+if ((import.meta as any).env?.DEV && !firebaseConfigured) {
+  // eslint-disable-next-line no-console
+  console.warn("[firebase] not configured. Keys present?", {
+    VITE_FIREBASE_API_KEY: readEnv("VITE_FIREBASE_API_KEY") ? "set" : "missing",
+    VITE_FIREBASE_AUTH_DOMAIN: readEnv("VITE_FIREBASE_AUTH_DOMAIN") ? "set" : "missing",
+    VITE_FIREBASE_PROJECT_ID: readEnv("VITE_FIREBASE_PROJECT_ID") ? "set" : "missing",
+  });
+}
 
 export async function initAnalytics() {
   if (typeof window === "undefined") return;
