@@ -114,7 +114,7 @@ export default function Heatmap() {
   const [price, setPrice] = useState<Record<string, PricePoint>>({});
 
   const [mode, setMode] = useState<"sync" | "manual">("sync");
-  const [analysisGranularity, setAnalysisGranularity] = useState<"day" | "hour" | "month">("day");
+  const [analysisGranularity, setAnalysisGranularity] = useState<"day" | "week" | "hour" | "month">("day");
   const [thresholds, setThresholds] = useState<{ min: string; base: string; max: string; weekendMult: string }>({
     min: "100",
     base: "150",
@@ -241,6 +241,44 @@ export default function Heatmap() {
       return { x: months, ask, demand, competitor, recommended, label: "Monthly view" };
     }
 
+    if (analysisGranularity === "week") {
+      const start = dayjs(from).startOf("day");
+      const end = dayjs(to).startOf("day");
+      const x: string[] = [];
+      const ask: number[] = [];
+      const demand: number[] = [];
+      const competitor: number[] = [];
+      const recommended: number[] = [];
+
+      let idx = 1;
+      for (let d = start; d.isBefore(end) || d.isSame(end, "day"); d = d.add(7, "day")) {
+        const weekStart = d;
+        const rawEnd = d.add(6, "day");
+        const weekEnd = rawEnd.isAfter(end) ? end : rawEnd;
+        const label = `W${idx} (${weekStart.format("MM/DD")})`;
+        idx += 1;
+
+        const daysInWeek: string[] = [];
+        for (let dd = weekStart; dd.isBefore(weekEnd) || dd.isSame(weekEnd, "day"); dd = dd.add(1, "day")) {
+          daysInWeek.push(dd.format("YYYY-MM-DD"));
+        }
+
+        const avgAsk = clamp(Math.round(daysInWeek.reduce((sum, day) => sum + askForDay(day), 0) / Math.max(1, daysInWeek.length)));
+        const wkAsk = clamp(Math.round(avgAsk * (0.97 + 0.08 * rnd())));
+        const wkDemand = clamp(Math.round(wkAsk * (1.04 + 0.10 * rnd())));
+        const wkCompetitor = clamp(Math.round(wkAsk * (0.78 + 0.12 * rnd())));
+        const wkRecommended = Math.round(Math.min(wkDemand, Math.max(wkCompetitor, (wkAsk + wkDemand) / 2)));
+
+        x.push(label);
+        ask.push(wkAsk);
+        demand.push(wkDemand);
+        competitor.push(wkCompetitor);
+        recommended.push(wkRecommended);
+      }
+
+      return { x, ask, demand, competitor, recommended, label: "Weekly view" };
+    }
+
     // day granularity
     const start = dayjs(from);
     const end = dayjs(to);
@@ -261,7 +299,7 @@ export default function Heatmap() {
         <Stack spacing={0.5}>
           <Typography variant="h4">Aladdin Pricing Engine</Typography>
           <Typography color="text.secondary">
-            Min / Base / Max thresholds, sync controls, occupancy + daily pricing (PriceLabs-style).
+            Min / Base / Max thresholds, sync controls, occupancy + daily pricing.
           </Typography>
         </Stack>
 
@@ -399,6 +437,7 @@ export default function Heatmap() {
                   onChange={(e) => setAnalysisGranularity(e.target.value as any)}
                 >
                   <MenuItem value="day">Day</MenuItem>
+                  <MenuItem value="week">Week</MenuItem>
                   <MenuItem value="hour">Hour</MenuItem>
                   <MenuItem value="month">Month</MenuItem>
                 </Select>
