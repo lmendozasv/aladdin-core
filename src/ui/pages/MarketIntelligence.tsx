@@ -88,34 +88,55 @@ function TabPanel({ value, index, children }: { value: number; index: number; ch
 
 function loadMapbox(accessToken: string | undefined, onLoaded: () => void, onError: (msg: string) => void) {
   if (!accessToken) return;
-  if (window.mapboxgl) {
+  const isV2 = typeof window.mapboxgl?.version === "string" && window.mapboxgl.version.startsWith("2.");
+  if (window.mapboxgl && isV2) {
     onLoaded();
     return;
   }
-  const existing = document.querySelector<HTMLScriptElement>('script[data-mapbox-gl="1"]');
+
+  const existing = document.querySelector<HTMLScriptElement>('script[data-mapbox-gl-v2="1"]');
   if (existing) {
     existing.addEventListener("load", onLoaded, { once: true });
     existing.addEventListener("error", () => onError("Failed to load Mapbox GL JS (script error)."), { once: true });
     return;
   }
+  // Ensure v2 is used even if a previous version is already present.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).mapboxgl = undefined;
+  } catch {
+    // ignore
+  }
+
+  // Use Mapbox GL JS v2.x for broader browser/driver compatibility (v3.x is stricter).
   const css = document.createElement("link");
   css.rel = "stylesheet";
-  css.href = "https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css";
-  css.dataset.mapboxGlCss = "1";
+  css.href = "https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css";
+  css.dataset.mapboxGlV2Css = "1";
   css.onerror = () => onError("Failed to load Mapbox GL CSS.");
   document.head.appendChild(css);
 
   const s = document.createElement("script");
-  s.dataset.mapboxGl = "1";
+  s.dataset.mapboxGlV2 = "1";
   s.async = true;
   s.defer = true;
-  s.src = "https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js";
+  s.src = "https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js";
   s.onload = onLoaded;
   s.onerror = () => onError("Failed to load Mapbox GL JS (network/CSP).");
   document.head.appendChild(s);
 }
 
-function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng: number }; points: HeatPoint[]; zoneLabel: string }) {
+function ZoneHeatMap({
+  center,
+  points,
+  zoneLabel,
+  base
+}: {
+  center: { lat: number; lng: number };
+  points: HeatPoint[];
+  zoneLabel: string;
+  base: { adr: number; occupancy: number; competitors: number };
+}) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
   const popupRef = useRef<any>(null);
@@ -124,8 +145,10 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
   const accessTokenRaw = (import.meta as any).env?.VITE_PUBLIC_MAPBOX_ACCESS_TOKEN as string | undefined;
   const accessToken = accessTokenRaw?.trim();
   const sourceId = "mi-heat-src";
-  const layerId = "mi-heat-layer";
+  const heatLayerId = "mi-heat-heat";
+  const pointsLayerId = "mi-heat-points";
   const [mapLoaded, setMapLoaded] = useState(false);
+  const [overlayReady, setOverlayReady] = useState(false);
 
   useEffect(() => {
     loadMapbox(
@@ -150,7 +173,8 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
         center: [center.lng, center.lat],
         zoom: 12.6,
         pitch: 0,
-        attributionControl: false
+        attributionControl: false,
+        antialias: true
       });
       popupRef.current = new window.mapboxgl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "260px" });
       mapRef.current.addControl(new window.mapboxgl.NavigationControl({ visualizePitch: false }), "top-right");
@@ -162,6 +186,7 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
         setTimeout(() => {
           try {
             mapRef.current?.resize?.();
+            mapRef.current?.triggerRepaint?.();
           } catch {
             // ignore
           }
@@ -169,10 +194,19 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
         setTimeout(() => {
           try {
             mapRef.current?.resize?.();
+            mapRef.current?.triggerRepaint?.();
           } catch {
             // ignore
           }
         }, 250);
+        setTimeout(() => {
+          try {
+            // Some Firefox setups need an explicit repaint after layout settles.
+            mapRef.current?.triggerRepaint?.();
+          } catch {
+            // ignore
+          }
+        }, 800);
       });
       mapRef.current.on("error", (e: any) => {
         const msg =
@@ -213,12 +247,20 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
       const f = e.features[0];
       const score = Number(f?.properties?.score);
       const label = String(f?.properties?.label || "");
+      const estOcc = clamp(base.occupancy * (0.85 + score * 0.35), 0.15, 0.95);
+      const estAdr = clamp(base.adr * (0.80 + score * 0.50), 45, 650);
+      const estRev = Math.round(estAdr * estOcc * 30);
       const html = `
         <div style="font-family: ui-sans-serif, system-ui; font-size: 12px; line-height: 1.35;">
           <div style="font-weight: 800; margin-bottom: 4px;">${zoneLabel}</div>
           <div style="opacity: 0.8;">${label}</div>
           <div style="margin-top: 6px;">
             <span style="font-weight: 700;">Commercial Potential:</span> ${Math.round(score * 100)}/100
+          </div>
+          <div style="margin-top: 6px; opacity: 0.95;">
+            <div><span style="font-weight: 700;">Est. Occupancy:</span> ${Math.round(estOcc * 100)}%</div>
+            <div><span style="font-weight: 700;">Est. ADR:</span> $${Math.round(estAdr)}</div>
+            <div><span style="font-weight: 700;">Est. Monthly Revenue:</span> $${estRev.toLocaleString()}</div>
           </div>
         </div>
       `;
@@ -234,19 +276,50 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
     };
 
     function upsert() {
+      setOverlayReady(false);
       if (!map.getSource(sourceId)) {
         map.addSource(sourceId, { type: "geojson", data: geojson });
       } else {
         map.getSource(sourceId).setData(geojson);
       }
 
-      if (!map.getLayer(layerId)) {
+      if (!map.getLayer(heatLayerId)) {
         map.addLayer({
-          id: layerId,
+          id: heatLayerId,
+          type: "heatmap",
+          source: sourceId,
+          paint: {
+            "heatmap-weight": ["interpolate", ["linear"], ["get", "score"], 0, 0.2, 1, 1],
+            "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 14, 1.7],
+            "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10, 16, 13, 34, 15, 56],
+            "heatmap-opacity": 0.70,
+            "heatmap-color": [
+              "interpolate",
+              ["linear"],
+              ["heatmap-density"],
+              0,
+              "rgba(0,0,0,0)",
+              0.15,
+              "#ff3b30",
+              0.45,
+              "#ff9500",
+              0.70,
+              "#ffcc00",
+              1,
+              "#34c759"
+            ]
+          }
+        });
+      }
+
+      if (!map.getLayer(pointsLayerId)) {
+        // Small visible points for "realistic scattered data" feel + hover target.
+        map.addLayer({
+          id: pointsLayerId,
           type: "circle",
           source: sourceId,
           paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 14, 13, 22, 15, 32],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4],
             "circle-color": [
               "interpolate",
               ["linear"],
@@ -260,35 +333,23 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
               1,
               "#34c759"
             ],
-            "circle-opacity": 0.32,
-            "circle-stroke-color": [
-              "interpolate",
-              ["linear"],
-              ["get", "score"],
-              0,
-              "#ff3b30",
-              0.35,
-              "#ff9500",
-              0.6,
-              "#ffcc00",
-              1,
-              "#34c759"
-            ],
-            "circle-stroke-width": 1,
-            "circle-stroke-opacity": 0.6
+            "circle-opacity": 0.70,
+            "circle-stroke-color": "rgba(0,0,0,0.20)",
+            "circle-stroke-width": 1
           }
         });
       }
 
       // (re)bind hover handlers (setStyle resets layers/handlers expectations)
       try {
-        map.off("mousemove", layerId, onMove);
-        map.off("mouseleave", layerId, onLeave);
+        map.off("mousemove", pointsLayerId, onMove);
+        map.off("mouseleave", pointsLayerId, onLeave);
       } catch {
         // ignore
       }
-      map.on("mousemove", layerId, onMove);
-      map.on("mouseleave", layerId, onLeave);
+      map.on("mousemove", pointsLayerId, onMove);
+      map.on("mouseleave", pointsLayerId, onLeave);
+      setOverlayReady(true);
     }
 
     if (map.loaded()) upsert();
@@ -296,13 +357,13 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
 
     return () => {
       try {
-        map.off("mousemove", layerId, onMove);
-        map.off("mouseleave", layerId, onLeave);
+        map.off("mousemove", pointsLayerId, onMove);
+        map.off("mouseleave", pointsLayerId, onLeave);
       } catch {
         // ignore
       }
     };
-  }, [ready, mapLoaded, points, zoneLabel]);
+  }, [ready, mapLoaded, points, zoneLabel, base.adr, base.occupancy, base.competitors]);
 
   if (!accessToken) {
     return (
@@ -335,24 +396,54 @@ function ZoneHeatMap({ center, points, zoneLabel }: { center: { lat: number; lng
         position: "relative",
         height: "100%",
         minHeight: 520,
-        borderRadius: 2,
-        overflow: "hidden",
-        bgcolor: "hsl(210 30% 96%)"
+        // Avoid clipping WebGL canvas (Firefox can render blank under borderRadius/overflow hidden)
+        overflow: "visible",
+        bgcolor: "transparent"
       }}
     >
+      <Box
+        sx={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: 2,
+          overflow: "hidden",
+          pointerEvents: "none",
+          border: "1px solid",
+          borderColor: "divider",
+          bgcolor: "hsl(210 30% 96%)",
+          zIndex: 3
+        }}
+      />
       <Box
         ref={mapEl}
         sx={{
           position: "absolute",
           inset: 0,
           zIndex: 0,
-          outline: "2px solid rgba(0,0,0,0.10)",
-          // Firefox/WebGL compositing mitigation
-          transform: "translateZ(0)",
-          willChange: "transform",
           isolation: "isolate"
         }}
       />
+      <Box
+        sx={{
+          position: "absolute",
+          left: 12,
+          top: 12,
+          zIndex: 2,
+          bgcolor: "rgba(255,255,255,0.92)",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 2,
+          px: 1.25,
+          py: 0.75,
+          display: "flex",
+          gap: 1,
+          alignItems: "center"
+        }}
+      >
+        <Chip size="small" label="Potential" />
+        <Chip size="small" variant="outlined" label={mapLoaded ? "Map: ready" : ready ? "Map: loading" : "Map: init"} sx={{ height: 22 }} />
+        <Chip size="small" variant="outlined" label={overlayReady ? `Overlay: ${points.length} pts` : "Overlay: loading"} sx={{ height: 22 }} />
+      </Box>
       {!ready ? (
         <Box
           sx={{
@@ -510,23 +601,48 @@ export default function MarketIntelligence() {
     };
     const center = centers[zone] || centers["Brickell, Miami"];
 
-    // 7x7 overlay points around center
-    const size = 7;
-    const stepLat = 0.0062; // ~0.7km
-    const stepLng = 0.0062;
-    const points: HeatPoint[] = [];
-    for (let r = 0; r < size; r++) {
-      for (let c = 0; c < size; c++) {
-        const dist = Math.abs(r - Math.floor(size / 2)) + Math.abs(c - Math.floor(size / 2));
-        const v = clamp(0.30 + rnd() * 0.75 - dist * 0.045, 0, 1);
-        points.push({
-          id: `p-${r}-${c}`,
-          lat: center.lat + (r - Math.floor(size / 2)) * stepLat,
-          lng: center.lng + (c - Math.floor(size / 2)) * stepLng,
-          score01: v,
-          label: `Submarket ${r + 1}.${c + 1}`
-        });
+    // Scattered points (multi-cluster) to mimic real listing/geodata density.
+    const clusters = [
+      { name: "Core", dLat: 0.0, dLng: 0.0, spread: 0.010, weight: 0.45 },
+      { name: "Waterfront", dLat: 0.006, dLng: 0.010, spread: 0.012, weight: 0.25 },
+      { name: "Residential", dLat: -0.008, dLng: -0.010, spread: 0.014, weight: 0.20 },
+      { name: "Transit", dLat: 0.010, dLng: -0.006, spread: 0.010, weight: 0.10 }
+    ];
+
+    function pickCluster() {
+      const x = rnd();
+      let acc = 0;
+      for (const c of clusters) {
+        acc += c.weight;
+        if (x <= acc) return c;
       }
+      return clusters[0];
+    }
+
+    // Box-Muller for roughly-normal scatter.
+    function randn() {
+      let u = 0;
+      let v = 0;
+      while (u === 0) u = rnd();
+      while (v === 0) v = rnd();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    const points: HeatPoint[] = [];
+    const total = 140;
+    for (let i = 0; i < total; i++) {
+      const c = pickCluster();
+      const lat = center.lat + c.dLat + randn() * c.spread;
+      const lng = center.lng + c.dLng + randn() * c.spread;
+      const dist = Math.sqrt(Math.pow((lat - center.lat) / 0.01, 2) + Math.pow((lng - center.lng) / 0.01, 2));
+      const baseScore = clamp(0.85 - dist * 0.18 + (rnd() - 0.5) * 0.22, 0, 1);
+      points.push({
+        id: `p-${i}`,
+        lat,
+        lng,
+        score01: baseScore,
+        label: `${c.name} area`
+      });
     }
 
     return { center, points };
@@ -676,7 +792,12 @@ export default function MarketIntelligence() {
                 Explore neighborhoods; hover to see score.
               </Typography>
               <Box sx={{ mt: 2 }}>
-                <ZoneHeatMap center={heat.center} points={heat.points} zoneLabel={zone} />
+                <ZoneHeatMap
+                  center={heat.center}
+                  points={heat.points}
+                  zoneLabel={zone}
+                  base={{ adr: kpis.adr, occupancy: kpis.occupancy, competitors: kpis.competitors }}
+                />
               </Box>
             </CardContent>
           </Card>
