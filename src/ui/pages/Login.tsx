@@ -2,7 +2,7 @@ import { Alert, Box, Button, Card, CardContent, Stack, TextField, Typography } f
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
-import { firebaseAuth } from "../../firebase/firebase";
+import { firebaseAuth, firebaseConfigErrors, firebaseConfigured } from "../../firebase/firebase";
 import { authExchange } from "../../api/core";
 import { setAccessToken } from "../../state/session";
 
@@ -14,6 +14,7 @@ export default function Login() {
   const loc = useLocation() as any;
 
   async function exchangeAndGo() {
+    if (!firebaseAuth) throw new Error("Firebase is not configured for this deployment");
     const fbUser = firebaseAuth.currentUser;
     if (!fbUser) throw new Error("Not authenticated in Firebase");
     const idToken = await fbUser.getIdToken();
@@ -26,6 +27,7 @@ export default function Login() {
   async function onSignIn() {
     setMsg(null);
     try {
+      if (!firebaseAuth) throw new Error("Firebase is not configured for this deployment");
       await signInWithEmailAndPassword(firebaseAuth, email, password);
       await exchangeAndGo();
     } catch (e: any) {
@@ -36,6 +38,7 @@ export default function Login() {
   async function onSignUp() {
     setMsg(null);
     try {
+      if (!firebaseAuth) throw new Error("Firebase is not configured for this deployment");
       await createUserWithEmailAndPassword(firebaseAuth, email, password);
       await exchangeAndGo();
     } catch (e: any) {
@@ -55,6 +58,13 @@ export default function Login() {
       <Card variant="outlined">
         <CardContent>
           <Stack spacing={2}>
+            {!firebaseConfigured ? (
+              <Alert severity="error">
+                Firebase is not configured for this deploy. Set Cloudflare Pages environment variables for Firebase
+                (VITE_FIREBASE_*) and rebuild.
+                {firebaseConfigErrors.length ? ` ${firebaseConfigErrors.join(" | ")}` : null}
+              </Alert>
+            ) : null}
             <TextField label="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
             <TextField
               label="Password"
@@ -63,10 +73,18 @@ export default function Login() {
               onChange={(e) => setPassword(e.target.value)}
             />
             <Stack direction="row" spacing={2}>
-              <Button variant="contained" onClick={onSignIn} disabled={!email || !password}>
+              <Button
+                variant="contained"
+                onClick={onSignIn}
+                disabled={!firebaseConfigured || !email || !password}
+              >
                 Sign in
               </Button>
-              <Button variant="outlined" onClick={onSignUp} disabled={!email || !password}>
+              <Button
+                variant="outlined"
+                onClick={onSignUp}
+                disabled={!firebaseConfigured || !email || !password}
+              >
                 Sign up
               </Button>
             </Stack>
@@ -77,4 +95,3 @@ export default function Login() {
     </Box>
   );
 }
-

@@ -23,6 +23,7 @@ This is a Vite + React Router SPA. Cloudflare Pages must be configured to serve 
 Notes:
 - SPA routing is handled by `public/_redirects`.
 - Assets caching + basic security headers are in `public/_headers`.
+- If Firebase env vars are missing at build time, the app will show a “Firebase is not configured” error on `/login`.
 
 ## Cloudflare Pages (CLI via Wrangler)
 

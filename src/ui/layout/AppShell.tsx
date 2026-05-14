@@ -148,7 +148,7 @@ export default function AppShell({ title, children }: PropsWithChildren<{ title:
               onClick={async () => {
                 clearSession();
                 try {
-                  await firebaseAuth.signOut();
+                  await firebaseAuth?.signOut();
                 } catch {
                   // ignore
                 }
