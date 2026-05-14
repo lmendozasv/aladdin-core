@@ -472,9 +472,6 @@ export default function Heatmap() {
         <Card variant="outlined">
           <CardContent>
             <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ mb: 2 }} alignItems="center">
-              <Typography variant="body2" color="text.secondary">
-                Legend
-              </Typography>
               <Stack direction="row" spacing={1} alignItems="center">
                 <Box sx={{ width: 14, height: 14, borderRadius: 1, bgcolor: "#fafafa", border: "1px solid", borderColor: "divider" }} />
                 <Typography variant="caption">Available</Typography>

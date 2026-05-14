@@ -43,7 +43,7 @@ export default function Login() {
       <Stack spacing={2} sx={{ mb: 2 }}>
         <Typography variant="h4">Sign in</Typography>
         <Typography color="text.secondary">
-          Authenticate with Firebase, then exchange for a STR JWT (RBAC roles + business scope).
+          Aladdin Price Engine
         </Typography>
       </Stack>
 

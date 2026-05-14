@@ -6,6 +6,9 @@ import Heatmap from "./pages/Heatmap";
 import PricingRules from "./pages/PricingRules";
 import Login from "./pages/Login";
 import Forbidden from "./pages/Forbidden";
+import MarketIntelligence from "./pages/MarketIntelligence";
+import CompetitiveSet from "./pages/CompetitiveSet";
+import RevenueOptimizer from "./pages/RevenueOptimizer";
 import ProtectedRoute from "./auth/ProtectedRoute";
 import AppShell from "./layout/AppShell";
 
@@ -31,6 +34,9 @@ export default function AppRoutes({ title }: { title: string }) {
             <Route path="/assets" element={<Assets />} />
             <Route path="/calendar" element={<CalendarPage />} />
             <Route path="/heatmap" element={<Heatmap />} />
+            <Route path="/market-intelligence" element={<MarketIntelligence />} />
+            <Route path="/competitive-set" element={<CompetitiveSet />} />
+            <Route path="/revenue-optimizer" element={<RevenueOptimizer />} />
             <Route path="/pricing/rules" element={<PricingRules />} />
           </Route>
         </Route>

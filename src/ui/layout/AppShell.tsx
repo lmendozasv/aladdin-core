@@ -23,6 +23,9 @@ import GridOnIcon from "@mui/icons-material/GridOn";
 import MenuIcon from "@mui/icons-material/Menu";
 import LogoutIcon from "@mui/icons-material/Logout";
 import TuneIcon from "@mui/icons-material/Tune";
+import TravelExploreIcon from "@mui/icons-material/TravelExplore";
+import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
+import ShowChartIcon from "@mui/icons-material/ShowChart";
 import { PropsWithChildren, useMemo, useState } from "react";
 import { Link as RouterLink, useLocation } from "react-router-dom";
 import { clearSession } from "../../state/session";
@@ -46,6 +49,9 @@ export default function AppShell({ title, children }: PropsWithChildren<{ title:
       { to: "/assets", label: "Assets", icon: <HomeWorkIcon /> },
       { to: "/calendar", label: "Calendar", icon: <CalendarMonthIcon /> },
       { to: "/heatmap", label: "Heatmap", icon: <GridOnIcon /> },
+      { to: "/market-intelligence", label: "Market Intelligence", icon: <TravelExploreIcon /> },
+      { to: "/competitive-set", label: "Competitive Set", icon: <CompareArrowsIcon /> },
+      { to: "/revenue-optimizer", label: "Revenue Optimizer", icon: <ShowChartIcon /> },
       { to: "/pricing/rules", label: "Rules Engine", icon: <TuneIcon /> }
     ],
     []
