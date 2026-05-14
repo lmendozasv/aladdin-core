@@ -17,8 +17,12 @@ function readEnv(k: string): string {
 }
 
 export const firebaseConfigErrors: string[] = [];
+export const firebaseConfigHints: string[] = [];
 
 function getFirebaseConfig(): FirebaseConfig | null {
+  // Hot-reload safety: recompute each load and don't accumulate stale errors.
+  firebaseConfigErrors.length = 0;
+  firebaseConfigHints.length = 0;
   const cfg: FirebaseConfig = {
     apiKey: readEnv("VITE_FIREBASE_API_KEY"),
     authDomain: readEnv("VITE_FIREBASE_AUTH_DOMAIN"),
@@ -28,6 +32,10 @@ function getFirebaseConfig(): FirebaseConfig | null {
     appId: readEnv("VITE_FIREBASE_APP_ID"),
     measurementId: readEnv("VITE_FIREBASE_MEASUREMENT_ID") || undefined
   };
+
+  if (cfg.apiKey) firebaseConfigHints.push(`apiKey: …${cfg.apiKey.slice(-6)} (len=${cfg.apiKey.length})`);
+  if (cfg.projectId) firebaseConfigHints.push(`projectId: ${cfg.projectId}`);
+  if (cfg.authDomain) firebaseConfigHints.push(`authDomain: ${cfg.authDomain}`);
 
   const required: (keyof FirebaseConfig)[] = [
     "apiKey",
@@ -39,9 +47,27 @@ function getFirebaseConfig(): FirebaseConfig | null {
   ];
   const missing = required.filter((k) => !cfg[k]);
   if (missing.length) {
-    firebaseConfigErrors.push(
-      `Firebase env missing: ${missing.map((m) => `VITE_FIREBASE_${String(m).toUpperCase()}`).join(", ")}`
-    );
+    const mapEnvName = (k: keyof FirebaseConfig) => {
+      switch (k) {
+        case "apiKey":
+          return "VITE_FIREBASE_API_KEY";
+        case "authDomain":
+          return "VITE_FIREBASE_AUTH_DOMAIN";
+        case "projectId":
+          return "VITE_FIREBASE_PROJECT_ID";
+        case "storageBucket":
+          return "VITE_FIREBASE_STORAGE_BUCKET";
+        case "messagingSenderId":
+          return "VITE_FIREBASE_MESSAGING_SENDER_ID";
+        case "appId":
+          return "VITE_FIREBASE_APP_ID";
+        case "measurementId":
+          return "VITE_FIREBASE_MEASUREMENT_ID";
+        default:
+          return String(k);
+      }
+    };
+    firebaseConfigErrors.push(`Firebase env missing: ${missing.map(mapEnvName).join(", ")}`);
     return null;
   }
   return cfg;

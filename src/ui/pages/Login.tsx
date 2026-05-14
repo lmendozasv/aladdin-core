@@ -2,7 +2,7 @@ import { Alert, Box, Button, Card, CardContent, Stack, TextField, Typography } f
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
-import { firebaseAuth, firebaseConfigErrors, firebaseConfigured } from "../../firebase/firebase";
+import { firebaseAuth, firebaseConfigErrors, firebaseConfigHints, firebaseConfigured } from "../../firebase/firebase";
 import { authExchange } from "../../api/core";
 import { setAccessToken } from "../../state/session";
 
@@ -63,6 +63,7 @@ export default function Login() {
                 Firebase is not configured for this deploy. Set Cloudflare Pages environment variables for Firebase
                 (VITE_FIREBASE_*) and rebuild.
                 {firebaseConfigErrors.length ? ` ${firebaseConfigErrors.join(" | ")}` : null}
+                {firebaseConfigHints.length ? ` Hints: ${firebaseConfigHints.join(" | ")}` : null}
               </Alert>
             ) : null}
             <TextField label="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
