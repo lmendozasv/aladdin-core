@@ -1,7 +1,7 @@
-import { Alert, Box, Button, Card, CardContent, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Card, CardContent, CircularProgress, Stack, TextField, Typography } from "@mui/material";
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword } from "firebase/auth";
 import { firebaseAuth, firebaseConfigErrors, firebaseConfigHints, firebaseConfigured } from "../../firebase/firebase";
 import { authExchange } from "../../api/core";
 import { setAccessToken } from "../../state/session";
@@ -10,6 +10,7 @@ export default function Login() {
   const [msg, setMsg] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
   const nav = useNavigate();
   const loc = useLocation() as any;
 
@@ -28,21 +29,12 @@ export default function Login() {
     setMsg(null);
     try {
       if (!firebaseAuth) throw new Error("Firebase is not configured for this deployment");
+      setLoading(true);
       await signInWithEmailAndPassword(firebaseAuth, email, password);
       await exchangeAndGo();
     } catch (e: any) {
       setMsg(e?.message || String(e));
-    }
-  }
-
-  async function onSignUp() {
-    setMsg(null);
-    try {
-      if (!firebaseAuth) throw new Error("Firebase is not configured for this deployment");
-      await createUserWithEmailAndPassword(firebaseAuth, email, password);
-      await exchangeAndGo();
-    } catch (e: any) {
-      setMsg(e?.message || String(e));
+      setLoading(false);
     }
   }
 
@@ -77,16 +69,10 @@ export default function Login() {
               <Button
                 variant="contained"
                 onClick={onSignIn}
-                disabled={!firebaseConfigured || !email || !password}
+                disabled={!firebaseConfigured || !email || !password || loading}
+                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : undefined}
               >
-                Sign in
-              </Button>
-              <Button
-                variant="outlined"
-                onClick={onSignUp}
-                disabled={!firebaseConfigured || !email || !password}
-              >
-                Sign up
+                {loading ? "Signing in…" : "Sign in"}
               </Button>
             </Stack>
             {msg ? <Alert severity="error">{msg}</Alert> : null}
