@@ -2,10 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
+  Button,
   CircularProgress,
   Card,
   CardContent,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   Grid,
@@ -36,6 +41,7 @@ import { getAccessToken } from "../../state/session";
 declare global {
   interface Window {
     mapboxgl?: any;
+    L?: any;
   }
 }
 
@@ -76,7 +82,19 @@ function heatColor(v01: number) {
   return `hsl(${hue} 85% 52%)`;
 }
 
-type HeatPoint = { id: string; lat: number; lng: number; score01: number; label: string };
+type HeatPoint = {
+  id: string;
+  lat: number;
+  lng: number;
+  score01: number;
+  submarket: string;
+  marketScore: number;
+  adr: number;
+  occupancy: number;
+  revenueMonthly: number;
+  competitors: number;
+  demandLabel: "High" | "Medium" | "Low";
+};
 
 function TabPanel({ value, index, children }: { value: number; index: number; children: React.ReactNode }) {
   return (
@@ -126,11 +144,69 @@ function loadMapbox(accessToken: string | undefined, onLoaded: () => void, onErr
   document.head.appendChild(s);
 }
 
-function ZoneHeatMap({
+function loadLeaflet(onLoaded: () => void, onError: (msg: string) => void) {
+  const ensureHeat = () => {
+    if (!window.L) return;
+    if (typeof window.L.heatLayer === "function") {
+      onLoaded();
+      return;
+    }
+    const heatExisting = document.querySelector<HTMLScriptElement>('script[data-leaflet-heat="1"]');
+    if (heatExisting) {
+      // If it's already loaded, proceed; otherwise wait for load.
+      if (typeof window.L.heatLayer === "function") onLoaded();
+      else {
+        heatExisting.addEventListener("load", onLoaded, { once: true });
+        heatExisting.addEventListener("error", () => onError("Failed to load Leaflet heat plugin (script error)."), { once: true });
+      }
+      return;
+    }
+    const hs = document.createElement("script");
+    hs.dataset.leafletHeat = "1";
+    hs.async = true;
+    hs.defer = true;
+    hs.src = "https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js";
+    hs.onload = onLoaded;
+    hs.onerror = () => onError("Failed to load Leaflet heat plugin (network/CSP).");
+    document.head.appendChild(hs);
+  };
+
+  // If Leaflet is already present (HMR/previous page), only ensure the heat plugin.
+  if (window.L) {
+    ensureHeat();
+    return;
+  }
+
+  const existing = document.querySelector<HTMLScriptElement>('script[data-leaflet="1"]');
+  if (existing) {
+    existing.addEventListener("load", ensureHeat, { once: true });
+    existing.addEventListener("error", () => onError("Failed to load Leaflet (script error)."), { once: true });
+    return;
+  }
+
+  const css = document.createElement("link");
+  css.rel = "stylesheet";
+  css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+  css.dataset.leafletCss = "1";
+  css.onerror = () => onError("Failed to load Leaflet CSS (network/CSP).");
+  document.head.appendChild(css);
+
+  const s = document.createElement("script");
+  s.dataset.leaflet = "1";
+  s.async = true;
+  s.defer = true;
+  s.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+  s.onload = () => {
+    ensureHeat();
+  };
+  s.onerror = () => onError("Failed to load Leaflet JS (network/CSP).");
+  document.head.appendChild(s);
+}
+
+function LeafletZoneHeatMap({
   center,
   points,
-  zoneLabel,
-  base
+  zoneLabel
 }: {
   center: { lat: number; lng: number };
   points: HeatPoint[];
@@ -139,290 +215,199 @@ function ZoneHeatMap({
 }) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
-  const popupRef = useRef<any>(null);
+  const layersRef = useRef<{ heat?: any; markers?: any }>({});
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [ready, setReady] = useState(false);
-  const [mapError, setMapError] = useState<string | null>(null);
-  const accessTokenRaw = (import.meta as any).env?.VITE_PUBLIC_MAPBOX_ACCESS_TOKEN as string | undefined;
-  const accessToken = accessTokenRaw?.trim();
-  const sourceId = "mi-heat-src";
-  const heatLayerId = "mi-heat-heat";
-  const pointsLayerId = "mi-heat-points";
   const [mapLoaded, setMapLoaded] = useState(false);
   const [overlayReady, setOverlayReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
+  const [selectedPoint, setSelectedPoint] = useState<HeatPoint | null>(null);
 
   useEffect(() => {
-    loadMapbox(
-      accessToken,
+    loadLeaflet(
       () => setReady(true),
       (msg) => setMapError(msg)
     );
-  }, [accessToken]);
+  }, []);
 
   useEffect(() => {
     if (!ready) return;
     if (!mapEl.current) return;
-    if (!window.mapboxgl) return;
-    if (!accessToken) return;
+    if (!window.L) return;
+
+    const L = window.L;
+
+    // If HMR/remount replaced the container, recreate.
+    const existing = mapRef.current;
+    if (existing && existing.getContainer && existing.getContainer() !== mapEl.current) {
+      try {
+        existing.remove();
+      } catch {
+        // ignore
+      }
+      mapRef.current = null;
+      setMapLoaded(false);
+    }
 
     if (!mapRef.current) {
-      window.mapboxgl.accessToken = accessToken;
-      const mapboxStyleUrl = `https://api.mapbox.com/styles/v1/mapbox/light-v11?access_token=${encodeURIComponent(accessToken)}`;
-      mapRef.current = new window.mapboxgl.Map({
-        container: mapEl.current,
-        style: mapboxStyleUrl,
-        center: [center.lng, center.lat],
-        zoom: 12.6,
-        pitch: 0,
-        attributionControl: false,
-        antialias: true
+      mapRef.current = L.map(mapEl.current, {
+        center: [center.lat, center.lng],
+        zoom: 13,
+        zoomControl: true,
+        attributionControl: true
       });
-      popupRef.current = new window.mapboxgl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "260px" });
-      mapRef.current.addControl(new window.mapboxgl.NavigationControl({ visualizePitch: false }), "top-right");
-      mapRef.current.addControl(new window.mapboxgl.AttributionControl({ compact: true }), "bottom-right");
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap contributors"
+      }).addTo(mapRef.current);
 
-      mapRef.current.on("load", () => {
-        setMapLoaded(true);
-        // Force resize after first paint (common when containers are flex/grid)
-        setTimeout(() => {
-          try {
-            mapRef.current?.resize?.();
-            mapRef.current?.triggerRepaint?.();
-          } catch {
-            // ignore
-          }
-        }, 0);
-        setTimeout(() => {
-          try {
-            mapRef.current?.resize?.();
-            mapRef.current?.triggerRepaint?.();
-          } catch {
-            // ignore
-          }
-        }, 250);
-        setTimeout(() => {
-          try {
-            // Some Firefox setups need an explicit repaint after layout settles.
-            mapRef.current?.triggerRepaint?.();
-          } catch {
-            // ignore
-          }
-        }, 800);
-      });
-      mapRef.current.on("error", (e: any) => {
-        const msg =
-          e?.error?.message ||
-          e?.error?.status ||
-          e?.type ||
-          "Mapbox error";
-        setMapError(String(msg));
-      });
-    } else {
-      mapRef.current.setCenter([center.lng, center.lat]);
+      // Resize handling for flex/grid.
       try {
-        mapRef.current.resize?.();
+        resizeObserverRef.current?.disconnect?.();
+        resizeObserverRef.current = new ResizeObserver(() => {
+          try {
+            mapRef.current?.invalidateSize?.({ animate: false });
+          } catch {
+            // ignore
+          }
+        });
+        if (mapEl.current) resizeObserverRef.current.observe(mapEl.current);
+      } catch {
+        // ignore
+      }
+
+      setMapLoaded(true);
+      // Let layout settle then invalidate.
+      setTimeout(() => {
+        try {
+          mapRef.current?.invalidateSize?.({ animate: false });
+        } catch {
+          // ignore
+        }
+      }, 0);
+    } else {
+      try {
+        mapRef.current.setView?.([center.lat, center.lng], mapRef.current.getZoom?.() ?? 13, { animate: false });
       } catch {
         // ignore
       }
     }
-  }, [ready, center.lat, center.lng, accessToken]);
+  }, [ready, center.lat, center.lng]);
 
   useEffect(() => {
     if (!ready) return;
     if (!mapLoaded) return;
     if (!mapRef.current) return;
-    if (!window.mapboxgl) return;
+    if (!window.L) return;
 
+    const L = window.L;
     const map = mapRef.current;
-    const geojson = {
-      type: "FeatureCollection",
-      features: points.map((p) => ({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-        properties: { id: p.id, score: p.score01, label: p.label }
-      }))
-    };
+    setOverlayReady(false);
 
-    const onMove = (e: any) => {
-      if (!e?.features?.length) return;
-      const f = e.features[0];
-      const score = Number(f?.properties?.score);
-      const label = String(f?.properties?.label || "");
-      const estOcc = clamp(base.occupancy * (0.85 + score * 0.35), 0.15, 0.95);
-      const estAdr = clamp(base.adr * (0.80 + score * 0.50), 45, 650);
-      const estRev = Math.round(estAdr * estOcc * 30);
+    try {
+      layersRef.current.heat?.remove?.();
+    } catch {
+      // ignore
+    }
+    try {
+      layersRef.current.markers?.clearLayers?.();
+    } catch {
+      // ignore
+    }
+
+    try {
+      // Use a multi-color gradient similar to the previous Mapbox heatmap.
+      const gradient = {
+        0.0: "rgba(0,0,0,0)",
+        0.15: "#ff3b30",
+        0.45: "#ff9500",
+        0.7: "#ffcc00",
+        1.0: "#34c759"
+      };
+
+      const heatPts = points.map((p) => [p.lat, p.lng, clamp(p.score01, 0, 1)]);
+      layersRef.current.heat = L.heatLayer(heatPts, {
+        radius: 34,
+        blur: 22,
+        max: 1.0,
+        maxZoom: 18,
+        minOpacity: 0.35,
+        gradient
+      }).addTo(map);
+    } catch (e: any) {
+      setMapError(`Heat layer error: ${String(e?.message || e)}`);
+    }
+
+    // Ensure markers are above the heat layer.
+    const markers = L.layerGroup().addTo(map);
+    layersRef.current.markers = markers;
+
+    for (const p of points) {
+      const color = heatColor(p.score01);
       const html = `
         <div style="font-family: ui-sans-serif, system-ui; font-size: 12px; line-height: 1.35;">
-          <div style="font-weight: 800; margin-bottom: 4px;">${zoneLabel}</div>
-          <div style="opacity: 0.8;">${label}</div>
-          <div style="margin-top: 6px;">
-            <span style="font-weight: 700;">Commercial Potential:</span> ${Math.round(score * 100)}/100
-          </div>
+          <div style="font-weight: 800; margin-bottom: 4px;">${p.submarket}</div>
+          <div style="opacity: 0.75; margin-bottom: 6px;">${zoneLabel}</div>
+          <div style="margin-top: 6px;"><span style="font-weight: 700;">Market Score:</span> ${p.marketScore}</div>
           <div style="margin-top: 6px; opacity: 0.95;">
-            <div><span style="font-weight: 700;">Est. Occupancy:</span> ${Math.round(estOcc * 100)}%</div>
-            <div><span style="font-weight: 700;">Est. ADR:</span> $${Math.round(estAdr)}</div>
-            <div><span style="font-weight: 700;">Est. Monthly Revenue:</span> $${estRev.toLocaleString()}</div>
+            <div><span style="font-weight: 700;">ADR:</span> $${Math.round(p.adr)}</div>
+            <div><span style="font-weight: 700;">Occupancy:</span> ${Math.round(p.occupancy * 100)}%</div>
+            <div><span style="font-weight: 700;">Estimated revenue:</span> $${Math.round(p.revenueMonthly).toLocaleString()}/mo</div>
+            <div><span style="font-weight: 700;">Competitors:</span> ${p.competitors}</div>
+            <div><span style="font-weight: 700;">Demand:</span> ${p.demandLabel}</div>
           </div>
         </div>
       `;
-      popupRef.current?.setLngLat(e.lngLat).setHTML(html).addTo(map);
-    };
 
-    const onLeave = () => {
-      try {
-        popupRef.current?.remove();
-      } catch {
-        // ignore
-      }
-    };
-
-    function upsert() {
-      setOverlayReady(false);
-      if (!map.getSource(sourceId)) {
-        map.addSource(sourceId, { type: "geojson", data: geojson });
-      } else {
-        map.getSource(sourceId).setData(geojson);
-      }
-
-      if (!map.getLayer(heatLayerId)) {
-        map.addLayer({
-          id: heatLayerId,
-          type: "heatmap",
-          source: sourceId,
-          paint: {
-            "heatmap-weight": ["interpolate", ["linear"], ["get", "score"], 0, 0.2, 1, 1],
-            "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 14, 1.7],
-            "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10, 16, 13, 34, 15, 56],
-            "heatmap-opacity": 0.70,
-            "heatmap-color": [
-              "interpolate",
-              ["linear"],
-              ["heatmap-density"],
-              0,
-              "rgba(0,0,0,0)",
-              0.15,
-              "#ff3b30",
-              0.45,
-              "#ff9500",
-              0.70,
-              "#ffcc00",
-              1,
-              "#34c759"
-            ]
-          }
-        });
-      }
-
-      if (!map.getLayer(pointsLayerId)) {
-        // Small visible points for "realistic scattered data" feel + hover target.
-        map.addLayer({
-          id: pointsLayerId,
-          type: "circle",
-          source: sourceId,
-          paint: {
-            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4],
-            "circle-color": [
-              "interpolate",
-              ["linear"],
-              ["get", "score"],
-              0,
-              "#ff3b30",
-              0.35,
-              "#ff9500",
-              0.6,
-              "#ffcc00",
-              1,
-              "#34c759"
-            ],
-            "circle-opacity": 0.70,
-            "circle-stroke-color": "rgba(0,0,0,0.20)",
-            "circle-stroke-width": 1
-          }
-        });
-      }
-
-      // (re)bind hover handlers (setStyle resets layers/handlers expectations)
-      try {
-        map.off("mousemove", pointsLayerId, onMove);
-        map.off("mouseleave", pointsLayerId, onLeave);
-      } catch {
-        // ignore
-      }
-      map.on("mousemove", pointsLayerId, onMove);
-      map.on("mouseleave", pointsLayerId, onLeave);
-      setOverlayReady(true);
+      const m = L.circleMarker([p.lat, p.lng], {
+        radius: 7,
+        color: "rgba(0,0,0,0.25)",
+        weight: 1,
+        fillColor: color,
+        fillOpacity: 0.8
+      });
+      m.bindPopup(html, { closeButton: false, autoClose: true, closeOnClick: false, maxWidth: 260 } as any);
+      m.on("mouseover", () => m.openPopup());
+      m.on("mouseout", () => m.closePopup());
+      m.on("click", () => setSelectedPoint(p));
+      m.addTo(markers);
     }
 
-    if (map.loaded()) upsert();
-    else map.once("load", upsert);
+    setOverlayReady(true);
+  }, [ready, mapLoaded, points, zoneLabel]);
 
+  useEffect(() => {
     return () => {
       try {
-        map.off("mousemove", pointsLayerId, onMove);
-        map.off("mouseleave", pointsLayerId, onLeave);
+        resizeObserverRef.current?.disconnect?.();
       } catch {
         // ignore
       }
+      resizeObserverRef.current = null;
+      try {
+        mapRef.current?.remove?.();
+      } catch {
+        // ignore
+      }
+      mapRef.current = null;
     };
-  }, [ready, mapLoaded, points, zoneLabel, base.adr, base.occupancy, base.competitors]);
-
-  if (!accessToken) {
-    return (
-      <Box
-        sx={{
-          height: "100%",
-          minHeight: 520,
-          borderRadius: 2,
-          border: "1px dashed",
-          borderColor: "divider",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          p: 3
-        }}
-      >
-        <Stack spacing={1} alignItems="center">
-          <Typography sx={{ fontWeight: 800 }}>Mapbox access token required</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", maxWidth: 420 }}>
-            Set <code>VITE_PUBLIC_MAPBOX_ACCESS_TOKEN</code> to enable the map and the commercial potential overlay.
-          </Typography>
-        </Stack>
-      </Box>
-    );
-  }
+  }, []);
 
   return (
-    <Box
-      sx={{
-        position: "relative",
-        height: "100%",
-        minHeight: 520,
-        // Avoid clipping WebGL canvas (Firefox can render blank under borderRadius/overflow hidden)
-        overflow: "visible",
-        bgcolor: "transparent"
-      }}
-    >
+    <Box sx={{ position: "relative", height: "100%", minHeight: 520, overflow: "visible", bgcolor: "transparent" }}>
       <Box
         sx={{
           position: "absolute",
           inset: 0,
           borderRadius: 2,
-          overflow: "hidden",
-          pointerEvents: "none",
           border: "1px solid",
           borderColor: "divider",
-          bgcolor: "hsl(210 30% 96%)",
-          zIndex: 3
+          boxShadow: "0 0 0 1px rgba(0,0,0,0.02) inset",
+          pointerEvents: "none",
+          zIndex: 1
         }}
       />
-      <Box
-        ref={mapEl}
-        sx={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 0,
-          isolation: "isolate"
-        }}
-      />
+      <Box ref={mapEl} sx={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <Box
         sx={{
           position: "absolute",
@@ -483,6 +468,1032 @@ function ZoneHeatMap({
           </Typography>
         </Box>
       ) : null}
+
+      <Dialog open={Boolean(selectedPoint)} onClose={() => setSelectedPoint(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Submarket detail</DialogTitle>
+        <DialogContent dividers>
+          {selectedPoint ? (
+            <Stack spacing={1.5}>
+              <Typography sx={{ fontWeight: 800 }}>{selectedPoint.submarket}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {zoneLabel}
+              </Typography>
+              <Grid container spacing={2} sx={{ mt: 0.5 }}>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Market score
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {selectedPoint.marketScore}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Demand
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {selectedPoint.demandLabel}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        ADR
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        ${Math.round(selectedPoint.adr)}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Occupancy
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {Math.round(selectedPoint.occupancy * 100)}%
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Estimated monthly revenue
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        ${Math.round(selectedPoint.revenueMonthly).toLocaleString()}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+            </Stack>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSelectedPoint(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}
+
+function ZoneHeatMap({
+  center,
+  points,
+  zoneLabel,
+  base
+}: {
+  center: { lat: number; lng: number };
+  points: HeatPoint[];
+  zoneLabel: string;
+  base: { adr: number; occupancy: number; competitors: number };
+}) {
+  const mapEl = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const popupRef = useRef<any>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const [ready, setReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
+  const accessTokenRaw = (import.meta as any).env?.VITE_PUBLIC_MAPBOX_ACCESS_TOKEN as string | undefined;
+  const accessToken = accessTokenRaw?.trim();
+  const sourceId = "mi-heat-src";
+  const heatLayerId = "mi-heat-heat";
+  const pointsLayerId = "mi-heat-points";
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [overlayReady, setOverlayReady] = useState(false);
+  const [selectedPoint, setSelectedPoint] = useState<HeatPoint | null>(null);
+  const [mapDebug, setMapDebug] = useState<string | null>(null);
+  const [forceOsmBase, setForceOsmBase] = useState(false);
+  const [mapHealth, setMapHealth] = useState<string>("init");
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
+  const [webglLost, setWebglLost] = useState(false);
+  const [paintProbe, setPaintProbe] = useState<string>("");
+  const [renderMode, setRenderMode] = useState<"live" | "image">("image");
+  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const frameLoopRef = useRef<number | null>(null);
+  const lastFrameAtRef = useRef(0);
+  const osmStyle = useMemo(
+    () => ({
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          attribution: "© OpenStreetMap contributors"
+        }
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }]
+    }),
+    []
+  );
+
+  useEffect(() => {
+    // Render-mode "image": mirror the WebGL canvas to an <img> to bypass compositor issues.
+    if (renderMode !== "image") return;
+    if (!mapLoaded) return;
+    const map = mapRef.current;
+    const canvas = map?.getCanvas?.();
+    if (!canvas?.toDataURL) return;
+
+    const tick = (t: number) => {
+      frameLoopRef.current = requestAnimationFrame(tick);
+      // Throttle to ~4 fps to reduce CPU usage.
+      if (t - lastFrameAtRef.current < 250) return;
+      lastFrameAtRef.current = t;
+      try {
+        map?.triggerRepaint?.();
+        const url = canvas.toDataURL("image/png");
+        if (typeof url === "string" && url.startsWith("data:image")) setFrameUrl(url);
+      } catch {
+        // ignore
+      }
+    };
+    frameLoopRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (frameLoopRef.current) cancelAnimationFrame(frameLoopRef.current);
+      frameLoopRef.current = null;
+    };
+  }, [renderMode, mapLoaded]);
+
+  useEffect(() => {
+    // In image mode, hide only the WebGL canvas, but keep the Mapbox DOM (controls + hit-testing)
+    // alive and interactive so tooltips/click/drag/zoom still work.
+    const map = mapRef.current;
+    if (!map) return;
+    try {
+      const canvas = map.getCanvas?.();
+      if (!canvas?.style) return;
+      // Don't set to 0: some browsers stop delivering pointer events reliably.
+      canvas.style.opacity = renderMode === "image" ? "0.0001" : "1";
+      canvas.style.pointerEvents = "auto";
+      const container = map.getContainer?.();
+      if (container?.style) container.style.pointerEvents = "auto";
+    } catch {
+      // ignore
+    }
+  }, [renderMode, mapLoaded]);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const map = mapRef.current;
+      if (!map) {
+        setMapHealth("no-map");
+        return;
+      }
+      try {
+        const canvas = map.getCanvas?.();
+        const rect = canvas?.getBoundingClientRect?.();
+        const w = Math.round(rect?.width || 0);
+        const h = Math.round(rect?.height || 0);
+        const styleLoaded = Boolean(map.isStyleLoaded?.());
+        const tilesLoaded = Boolean(map.areTilesLoaded?.());
+        const loaded = Boolean(map.loaded?.());
+        setMapHealth(
+          `canvas=${w}x${h} loaded=${loaded ? "1" : "0"} style=${styleLoaded ? "1" : "0"} tiles=${tilesLoaded ? "1" : "0"} base=${
+            forceOsmBase ? "osm" : "mapbox"
+          }`
+        );
+
+        // Probe what element is actually on top of the map area (helps detect overlays hiding the canvas).
+        const px = Math.round((rect?.left || 0) + (rect?.width || 0) / 2);
+        const py = Math.round((rect?.top || 0) + (rect?.height || 0) / 2);
+        const el = document.elementFromPoint(px, py) as HTMLElement | null;
+        const elTag = el?.tagName?.toLowerCase?.() || "none";
+        const elClass = (el?.className && String(el.className).split(" ").slice(0, 3).join(".")) || "";
+        const cs = canvas ? window.getComputedStyle(canvas) : null;
+        const cOpacity = cs?.opacity || "?";
+        const cVis = cs?.visibility || "?";
+        const cDisplay = cs?.display || "?";
+        const cZ = cs?.zIndex || "?";
+        const cPE = cs?.pointerEvents || "?";
+        const cMix = cs?.mixBlendMode || "?";
+        const cFilter = cs?.filter || "?";
+        const elCs = el ? window.getComputedStyle(el) : null;
+        const elBg = elCs?.backgroundColor || "?";
+        const elOp = elCs?.opacity || "?";
+        const elZ = elCs?.zIndex || "?";
+        const elPE = elCs?.pointerEvents || "?";
+        setPaintProbe(
+          `${elTag}${elClass ? "." + elClass : ""} bg=${elBg} op=${elOp} z=${elZ} pe=${elPE} | canvas z=${cZ} pe=${cPE} disp=${cDisplay} vis=${cVis} op=${cOpacity} mix=${cMix} filter=${cFilter}`
+        );
+      } catch {
+        setMapHealth("health-error");
+      }
+    }, 800);
+    return () => clearInterval(t);
+  }, [forceOsmBase]);
+
+  useEffect(() => {
+    loadMapbox(
+      accessToken,
+      () => setReady(true),
+      (msg) => setMapError(msg)
+    );
+  }, [accessToken]);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!mapEl.current) return;
+    if (!window.mapboxgl) return;
+    if (!accessToken) return;
+
+    // If HMR or remounting replaced the container, recreate the map.
+    const existing = mapRef.current;
+    if (existing && existing.getContainer && existing.getContainer() !== mapEl.current) {
+      try {
+        existing.remove();
+      } catch {
+        // ignore
+      }
+      mapRef.current = null;
+      setMapLoaded(false);
+    }
+
+    if (!mapRef.current) {
+      window.mapboxgl.accessToken = accessToken;
+      const mapboxStyleUrl = `https://api.mapbox.com/styles/v1/mapbox/light-v11?access_token=${encodeURIComponent(accessToken)}`;
+      mapRef.current = new window.mapboxgl.Map({
+        container: mapEl.current,
+        style: forceOsmBase ? (osmStyle as any) : mapboxStyleUrl,
+        center: [center.lng, center.lat],
+        zoom: 12.6,
+        pitch: 0,
+        attributionControl: false,
+        antialias: true,
+        // Firefox: helps avoid "blank until interaction" WebGL presentation glitches.
+        preserveDrawingBuffer: true,
+        dragPan: true,
+        scrollZoom: true,
+        doubleClickZoom: true,
+        boxZoom: true,
+        keyboard: true,
+        touchZoomRotate: true
+      });
+      popupRef.current = new window.mapboxgl.Popup({ closeButton: false, closeOnClick: false, maxWidth: "260px" });
+      mapRef.current.addControl(new window.mapboxgl.NavigationControl({ visualizePitch: false }), "top-right");
+      mapRef.current.addControl(new window.mapboxgl.AttributionControl({ compact: true }), "bottom-right");
+
+      // Keep the map responsive even when embedded in flex/grid/tabs.
+      try {
+        resizeObserverRef.current?.disconnect?.();
+        resizeObserverRef.current = new ResizeObserver(() => {
+          try {
+            mapRef.current?.resize?.();
+            mapRef.current?.triggerRepaint?.();
+          } catch {
+            // ignore
+          }
+        });
+        if (mapEl.current) resizeObserverRef.current.observe(mapEl.current);
+      } catch {
+        // ignore
+      }
+
+      mapRef.current.on("load", () => {
+        setMapLoaded(true);
+        // Firefox compositor nudge: ensure the WebGL canvas is on its own layer.
+        try {
+          const canvas = mapRef.current?.getCanvas?.();
+          if (canvas && canvas.style) {
+            canvas.style.transform = "translate3d(0,0,0)";
+            canvas.style.willChange = "transform";
+            canvas.style.backfaceVisibility = "hidden";
+            // Avoid filters on the canvas; some Firefox setups end up compositing it incorrectly.
+            canvas.style.filter = "none";
+            // Tiny opacity nudge (should be visually identical) that can fix certain compositor glitches.
+            canvas.style.opacity = "0.9999";
+          }
+        } catch {
+          // ignore
+        }
+        // Firefox "blank until readback" workaround: force a tiny GPU readback once,
+        // which can kick the compositor on some drivers.
+        try {
+          const canvas = mapRef.current?.getCanvas?.();
+          const gl: any =
+            canvas?.getContext?.("webgl2", { preserveDrawingBuffer: true }) ||
+            canvas?.getContext?.("webgl", { preserveDrawingBuffer: true });
+          if (gl?.readPixels) {
+            const px = new Uint8Array(4);
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            gl.flush?.();
+            gl.finish?.();
+          }
+        } catch {
+          // ignore
+        }
+        // If Firefox only presents after a canvas readback (similar to clicking Snapshot),
+        // do a lightweight toDataURL once and discard it.
+        try {
+          const canvas = mapRef.current?.getCanvas?.();
+          if (canvas?.toDataURL) {
+            requestAnimationFrame(() => {
+              try {
+                void canvas.toDataURL("image/png");
+              } catch {
+                // ignore
+              }
+            });
+            setTimeout(() => {
+              try {
+                void canvas.toDataURL("image/png");
+              } catch {
+                // ignore
+              }
+            }, 250);
+          }
+        } catch {
+          // ignore
+        }
+        try {
+          const canvas = mapRef.current?.getCanvas?.();
+          if (canvas && canvas.addEventListener) {
+            const onLost = (ev: any) => {
+              try {
+                ev?.preventDefault?.();
+              } catch {
+                // ignore
+              }
+              setWebglLost(true);
+              setMapDebug("webglcontextlost");
+            };
+            const onRestored = () => {
+              setWebglLost(false);
+              setMapDebug("webglcontextrestored");
+              try {
+                mapRef.current?.resize?.();
+                mapRef.current?.triggerRepaint?.();
+              } catch {
+                // ignore
+              }
+            };
+            canvas.addEventListener("webglcontextlost", onLost, false);
+            canvas.addEventListener("webglcontextrestored", onRestored, false);
+          }
+        } catch {
+          // ignore
+        }
+        // Force a short repaint loop; some Firefox/GPU combos won't present the WebGL canvas
+        // until a user interaction or a few animation frames have occurred.
+        try {
+          const map = mapRef.current;
+          const start = performance.now();
+          const tick = (t: number) => {
+            try {
+              map?.triggerRepaint?.();
+              map?.resize?.();
+            } catch {
+              // ignore
+            }
+            if (t - start < 4000) requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        } catch {
+          // ignore
+        }
+        try {
+          // Explicitly enable pan/zoom handlers (some browser setups can end up disabled).
+          mapRef.current.dragPan?.enable?.();
+          mapRef.current.scrollZoom?.enable?.();
+          mapRef.current.boxZoom?.enable?.();
+          mapRef.current.doubleClickZoom?.enable?.();
+          mapRef.current.keyboard?.enable?.();
+          mapRef.current.touchZoomRotate?.enable?.();
+          // UX: no rotation (Airbnb-like)
+          mapRef.current.dragRotate?.disable?.();
+          mapRef.current.touchZoomRotate?.disableRotation?.();
+        } catch {
+          // ignore
+        }
+        // Force resize after first paint (common when containers are flex/grid)
+        setTimeout(() => {
+          try {
+            mapRef.current?.resize?.();
+            mapRef.current?.triggerRepaint?.();
+          } catch {
+            // ignore
+          }
+        }, 0);
+        setTimeout(() => {
+          try {
+            mapRef.current?.resize?.();
+            mapRef.current?.triggerRepaint?.();
+          } catch {
+            // ignore
+          }
+        }, 250);
+        setTimeout(() => {
+          try {
+            // Some Firefox setups need an explicit repaint after layout settles.
+            mapRef.current?.triggerRepaint?.();
+          } catch {
+            // ignore
+          }
+        }, 800);
+      });
+      mapRef.current.on("error", (e: any) => {
+        const msg =
+          e?.error?.message ||
+          e?.error?.status ||
+          e?.type ||
+          "Mapbox error";
+        setMapError(String(msg));
+        try {
+          const status = e?.error?.status ? ` status=${e.error.status}` : "";
+          const url = e?.error?.url ? ` url=${e.error.url}` : "";
+          setMapDebug(`map.error:${String(msg)}${status}${url}`);
+        } catch {
+          // ignore
+        }
+
+        // If the basemap/style requests keep failing (CSP/DNS/adblock), switch to OSM raster so the map renders.
+        try {
+          const url = String(e?.error?.url || "");
+          const status = Number(e?.error?.status || 0);
+          const isMapbox =
+            url.includes("api.mapbox.com/styles") ||
+            url.includes("api.mapbox.com/v4") ||
+            url.includes("tiles.mapbox.com") ||
+            url.includes("events.mapbox.com");
+          if (!forceOsmBase && isMapbox && (status === 401 || status === 403 || status === 404 || status === 0)) {
+            setForceOsmBase(true);
+          }
+        } catch {
+          // ignore
+        }
+      });
+    } else {
+      mapRef.current.setCenter([center.lng, center.lat]);
+      if (forceOsmBase) {
+        try {
+          const style = mapRef.current.getStyle?.();
+          const hasOsm = Boolean(style?.sources?.osm);
+          if (!hasOsm) mapRef.current.setStyle?.(osmStyle as any);
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        mapRef.current.resize?.();
+      } catch {
+        // ignore
+      }
+    }
+  }, [ready, center.lat, center.lng, accessToken, forceOsmBase]);
+
+  const takeSnapshot = () => {
+    try {
+      const map = mapRef.current;
+      if (!map) return;
+      const canvas = map.getCanvas?.();
+      if (!canvas) return;
+      const url = canvas.toDataURL?.("image/png");
+      if (typeof url === "string" && url.startsWith("data:image")) setSnapshotUrl(url);
+      else setMapDebug("snapshot-failed");
+    } catch (e: any) {
+      setMapDebug(`snapshot-error:${String(e?.message || e)}`);
+    }
+  };
+
+  useEffect(() => {
+    // Cleanup only on unmount.
+    return () => {
+      try {
+        resizeObserverRef.current?.disconnect?.();
+      } catch {
+        // ignore
+      }
+      resizeObserverRef.current = null;
+      try {
+        mapRef.current?.remove?.();
+      } catch {
+        // ignore
+      }
+      mapRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    if (!mapLoaded) return;
+    if (!mapRef.current) return;
+    if (!window.mapboxgl) return;
+
+    const map = mapRef.current;
+    const geojson = {
+      type: "FeatureCollection",
+      features: points.map((p) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+        properties: {
+          id: p.id,
+          score: p.score01,
+          submarket: p.submarket,
+          marketScore: p.marketScore,
+          adr: p.adr,
+          occupancy: p.occupancy,
+          revenueMonthly: p.revenueMonthly,
+          competitors: p.competitors,
+          demandLabel: p.demandLabel
+        }
+      }))
+    };
+
+    const onMove = (e: any) => {
+      if (!e?.features?.length) return;
+      const f = e.features[0];
+      const submarket = String(f?.properties?.submarket || "Submarket");
+      const marketScore = Number(f?.properties?.marketScore);
+      const adr = Number(f?.properties?.adr);
+      const occupancy = Number(f?.properties?.occupancy);
+      const revenueMonthly = Number(f?.properties?.revenueMonthly);
+      const competitors = Number(f?.properties?.competitors);
+      const demandLabel = String(f?.properties?.demandLabel || "Medium");
+      const html = `
+        <div style="font-family: ui-sans-serif, system-ui; font-size: 12px; line-height: 1.35;">
+          <div style="font-weight: 800; margin-bottom: 4px;">${submarket}</div>
+          <div style="opacity: 0.75; margin-bottom: 6px;">${zoneLabel}</div>
+          <div style="margin-top: 6px;">
+            <span style="font-weight: 700;">Market Score:</span> ${marketScore}
+          </div>
+          <div style="margin-top: 6px; opacity: 0.95;">
+            <div><span style="font-weight: 700;">ADR:</span> $${Math.round(adr)}</div>
+            <div><span style="font-weight: 700;">Occupancy:</span> ${Math.round(occupancy * 100)}%</div>
+            <div><span style="font-weight: 700;">Estimated revenue:</span> $${Math.round(revenueMonthly).toLocaleString()}/mo</div>
+            <div><span style="font-weight: 700;">Competitors:</span> ${competitors}</div>
+            <div><span style="font-weight: 700;">Demand:</span> ${demandLabel}</div>
+          </div>
+        </div>
+      `;
+      popupRef.current?.setLngLat(e.lngLat).setHTML(html).addTo(map);
+    };
+
+    const onLeave = () => {
+      try {
+        popupRef.current?.remove();
+      } catch {
+        // ignore
+      }
+    };
+
+    // Show tooltip even if the cursor is near a point (not exactly over the tiny circle).
+    const onMapMove = (e: any) => {
+      try {
+        const buffer = 18;
+        const p = e.point;
+        const bbox: [[number, number], [number, number]] = [
+          [p.x - buffer, p.y - buffer],
+          [p.x + buffer, p.y + buffer]
+        ];
+        const feats = map.queryRenderedFeatures(bbox, { layers: [pointsLayerId] }) || [];
+        if (!feats.length) {
+          onLeave();
+          return;
+        }
+        onMove({ ...e, features: feats });
+      } catch {
+        // ignore
+      }
+    };
+
+    function upsert() {
+      setOverlayReady(false);
+      if (!map.getSource(sourceId)) {
+        map.addSource(sourceId, { type: "geojson", data: geojson });
+      } else {
+        map.getSource(sourceId).setData(geojson);
+      }
+
+      if (!map.getLayer(heatLayerId)) {
+        map.addLayer({
+          id: heatLayerId,
+          type: "heatmap",
+          source: sourceId,
+          paint: {
+            "heatmap-weight": ["interpolate", ["linear"], ["get", "score"], 0, 0.2, 1, 1],
+            "heatmap-intensity": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 14, 1.7],
+            "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 10, 16, 13, 34, 15, 56],
+            "heatmap-opacity": 0.70,
+            "heatmap-color": [
+              "interpolate",
+              ["linear"],
+              ["heatmap-density"],
+              0,
+              "rgba(0,0,0,0)",
+              0.15,
+              "#ff3b30",
+              0.45,
+              "#ff9500",
+              0.70,
+              "#ffcc00",
+              1,
+              "#34c759"
+            ]
+          }
+        });
+      }
+
+      if (!map.getLayer(pointsLayerId)) {
+        // Small visible points for "realistic scattered data" feel + hover target.
+        map.addLayer({
+          id: pointsLayerId,
+          type: "circle",
+          source: sourceId,
+          paint: {
+            "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 4, 14, 7],
+            "circle-color": [
+              "interpolate",
+              ["linear"],
+              ["get", "score"],
+              0,
+              "#ff3b30",
+              0.35,
+              "#ff9500",
+              0.6,
+              "#ffcc00",
+              1,
+              "#34c759"
+            ],
+            "circle-opacity": 0.70,
+            "circle-stroke-color": "rgba(0,0,0,0.20)",
+            "circle-stroke-width": 1
+          }
+        });
+      }
+
+      // (re)bind hover handlers (setStyle resets layers/handlers expectations)
+      try {
+        map.off("mousemove", pointsLayerId, onMove);
+        map.off("mouseleave", pointsLayerId, onLeave);
+        map.off("mousemove", onMapMove);
+      } catch {
+        // ignore
+      }
+      map.on("mousemove", pointsLayerId, onMove);
+      map.on("mouseleave", pointsLayerId, onLeave);
+      map.on("mousemove", onMapMove);
+      map.on("click", pointsLayerId, (e: any) => {
+        try {
+          const f = e?.features?.[0];
+          if (!f) return;
+          const id = String(f.properties?.id || "");
+          const p = points.find((x) => x.id === id) || null;
+          setSelectedPoint(p);
+        } catch {
+          // ignore
+        }
+      });
+      setOverlayReady(true);
+    }
+
+    if (map.loaded()) upsert();
+    else map.once("load", upsert);
+
+    return () => {
+      try {
+        map.off("mousemove", pointsLayerId, onMove);
+        map.off("mouseleave", pointsLayerId, onLeave);
+        map.off("mousemove", onMapMove);
+      } catch {
+        // ignore
+      }
+    };
+  }, [ready, mapLoaded, points, zoneLabel, base.adr, base.occupancy, base.competitors]);
+
+  if (!accessToken) {
+    return (
+      <Box
+        sx={{
+          height: "100%",
+          minHeight: 520,
+          borderRadius: 2,
+          border: "1px dashed",
+          borderColor: "divider",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          p: 3
+        }}
+      >
+        <Stack spacing={1} alignItems="center">
+          <Typography sx={{ fontWeight: 800 }}>Mapbox access token required</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", maxWidth: 420 }}>
+            Set <code>VITE_PUBLIC_MAPBOX_ACCESS_TOKEN</code> to enable the map and the commercial potential overlay.
+          </Typography>
+        </Stack>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      sx={{
+        position: "relative",
+        height: "100%",
+        minHeight: 520,
+        // Keep overlays/chips un-clipped; the map itself is clipped inside an inner wrapper.
+        overflow: "visible",
+        bgcolor: "transparent"
+      }}
+    >
+      {/* Visual chrome (rounded border) without covering the WebGL canvas */}
+      <Box
+        sx={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: 2,
+          border: "1px solid",
+          borderColor: "divider",
+          boxShadow: "0 0 0 1px rgba(0,0,0,0.02) inset",
+          pointerEvents: "none",
+          zIndex: 1
+        }}
+      />
+      {/* Clip only the map area (not the chips/overlays) */}
+      <Box
+        sx={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 0,
+          borderRadius: 2,
+          overflow: "hidden"
+        }}
+      >
+        {renderMode === "image" && frameUrl ? (
+          <Box
+            component="img"
+            src={frameUrl}
+            alt="Map"
+            sx={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              zIndex: 0,
+              pointerEvents: "none"
+            }}
+          />
+        ) : null}
+      <Box
+        ref={mapEl}
+        sx={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 1,
+          // Firefox: WebGL canvases can fail to composite under some stacking contexts.
+          // Force a compositor layer on the container instead of using `isolation`.
+          isolation: "auto",
+          transform: "translate3d(0,0,0)",
+          willChange: "transform",
+          backfaceVisibility: "hidden",
+          // Another nudge for some Firefox/GPU combos
+          // (keep filter off by default to avoid unexpected effects)
+          filter: "none"
+        }}
+      />
+      </Box>
+      <Box
+        sx={{
+          position: "absolute",
+          left: 12,
+          top: 12,
+          zIndex: 2,
+          bgcolor: "rgba(255,255,255,0.92)",
+          border: "1px solid",
+          borderColor: "divider",
+          borderRadius: 2,
+          px: 1.25,
+          py: 0.75,
+          display: "flex",
+          gap: 1,
+          alignItems: "center"
+        }}
+      >
+        <Chip size="small" label="Potential" />
+        <Chip size="small" variant="outlined" label={mapLoaded ? "Map: ready" : ready ? "Map: loading" : "Map: init"} sx={{ height: 22 }} />
+        <Chip size="small" variant="outlined" label={overlayReady ? `Overlay: ${points.length} pts` : "Overlay: loading"} sx={{ height: 22 }} />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={renderMode === "image" ? "Render: image" : "Render: live"}
+          onClick={() => setRenderMode((m) => (m === "image" ? "live" : "image"))}
+          sx={{ height: 22, cursor: "pointer" }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={mapHealth}
+          sx={{ height: 22, maxWidth: 320, "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" } }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={paintProbe || "probe…"}
+          sx={{ height: 22, maxWidth: 380, "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" } }}
+        />
+        <Chip
+          size="small"
+          variant="outlined"
+          label={webglLost ? "WebGL: lost" : "Snapshot"}
+          onClick={webglLost ? undefined : takeSnapshot}
+          sx={{ height: 22, cursor: webglLost ? "default" : "pointer" }}
+        />
+      </Box>
+      {!ready ? (
+        <Box
+          sx={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            bgcolor: "background.paper"
+          }}
+        >
+          <Stack spacing={1} alignItems="center">
+            <CircularProgress size={28} />
+            <Typography variant="body2" color="text.secondary">
+              Loading map…
+            </Typography>
+          </Stack>
+        </Box>
+      ) : null}
+      {mapError ? (
+        <Box
+          sx={{
+            position: "absolute",
+            left: 12,
+            bottom: 12,
+            right: 12,
+            bgcolor: "rgba(255,255,255,0.92)",
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 2,
+            px: 1.25,
+            py: 1
+          }}
+        >
+          <Typography variant="caption" color="error" sx={{ fontWeight: 700 }}>
+            Map error: {mapError}
+          </Typography>
+        </Box>
+      ) : null}
+      {mapDebug ? (
+        <Box
+          sx={{
+            position: "absolute",
+            left: 12,
+            bottom: mapError ? 56 : 12,
+            right: 12,
+            bgcolor: "rgba(255,255,255,0.92)",
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 2,
+            px: 1.25,
+            py: 1
+          }}
+        >
+          <Typography variant="caption" sx={{ fontWeight: 700 }}>
+            {mapDebug}
+          </Typography>
+        </Box>
+      ) : null}
+      {snapshotUrl ? (
+        <Box
+          sx={{
+            position: "absolute",
+            inset: 12,
+            zIndex: 3,
+            bgcolor: "rgba(255,255,255,0.96)",
+            border: "1px solid",
+            borderColor: "divider",
+            borderRadius: 2,
+            p: 1,
+            display: "flex",
+            flexDirection: "column",
+            gap: 1
+          }}
+        >
+          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+            <Typography variant="caption" sx={{ fontWeight: 800 }}>
+              Canvas snapshot (debug)
+            </Typography>
+            <Button size="small" variant="outlined" onClick={() => setSnapshotUrl(null)}>
+              Close
+            </Button>
+          </Stack>
+          <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", borderRadius: 1 }}>
+            <Box component="img" src={snapshotUrl} alt="Map snapshot" sx={{ width: "100%", display: "block" }} />
+          </Box>
+        </Box>
+      ) : null}
+
+      <Dialog open={Boolean(selectedPoint)} onClose={() => setSelectedPoint(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Submarket detail</DialogTitle>
+        <DialogContent dividers>
+          {selectedPoint ? (
+            <Stack spacing={1.5}>
+              <Typography sx={{ fontWeight: 800 }}>{selectedPoint.submarket}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {zoneLabel}
+              </Typography>
+              <Grid container spacing={2} sx={{ mt: 0.5 }}>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Market score
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {selectedPoint.marketScore}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Demand
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {selectedPoint.demandLabel}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        ADR
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        ${Math.round(selectedPoint.adr)}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={6}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Occupancy
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        {Math.round(selectedPoint.occupancy * 100)}%
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12}>
+                  <Card variant="outlined">
+                    <CardContent>
+                      <Typography variant="overline" color="text.secondary">
+                        Estimated monthly revenue
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 900 }}>
+                        ${Math.round(selectedPoint.revenueMonthly).toLocaleString()}/mo
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Competitors: {selectedPoint.competitors}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+              <Divider />
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                <Button variant="contained" onClick={() => (window.location.href = "/competitive-set")}>
+                  View Competitive Set
+                </Button>
+                <Button variant="outlined" onClick={() => (window.location.href = "/revenue-optimizer")}>
+                  Create Revenue Optimizer
+                </Button>
+              </Stack>
+            </Stack>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSelectedPoint(null)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -629,19 +1640,33 @@ export default function MarketIntelligence() {
     }
 
     const points: HeatPoint[] = [];
-    const total = 140;
+    const total = 10;
     for (let i = 0; i < total; i++) {
       const c = pickCluster();
       const lat = center.lat + c.dLat + randn() * c.spread;
       const lng = center.lng + c.dLng + randn() * c.spread;
       const dist = Math.sqrt(Math.pow((lat - center.lat) / 0.01, 2) + Math.pow((lng - center.lng) / 0.01, 2));
       const baseScore = clamp(0.85 - dist * 0.18 + (rnd() - 0.5) * 0.22, 0, 1);
+
+      const marketScore = clamp(Math.round(55 + baseScore * 45 + rnd() * 6), 0, 100);
+      const adr = clamp(Math.round(kpis.adr * (0.82 + baseScore * 0.45)), 45, 650);
+      const occupancy = clamp(kpis.occupancy * (0.78 + baseScore * 0.45), 0.15, 0.95);
+      const revenueMonthly = Math.round(adr * occupancy * 30);
+      const competitors = Math.max(6, Math.round(kpis.competitors * (0.25 + baseScore * 0.18)));
+      const demandLabel: HeatPoint["demandLabel"] = baseScore >= 0.72 ? "High" : baseScore >= 0.48 ? "Medium" : "Low";
+
       points.push({
         id: `p-${i}`,
         lat,
         lng,
         score01: baseScore,
-        label: `${c.name} area`
+        submarket: `${c.name} area`,
+        marketScore,
+        adr,
+        occupancy,
+        revenueMonthly,
+        competitors,
+        demandLabel
       });
     }
 
@@ -785,14 +1810,14 @@ export default function MarketIntelligence() {
 
       <Grid container spacing={2}>
         <Grid item xs={12} lg={6}>
-          <Card sx={{ height: "100%" }}>
-            <CardContent>
+          <Card sx={{ height: "100%", overflow: "visible" }}>
+            <CardContent sx={{ overflow: "visible" }}>
               <Typography sx={{ fontWeight: 800 }}>Map (quality / commercial potential)</Typography>
               <Typography variant="body2" color="text.secondary">
                 Explore neighborhoods; hover to see score.
               </Typography>
               <Box sx={{ mt: 2 }}>
-                <ZoneHeatMap
+                <LeafletZoneHeatMap
                   center={heat.center}
                   points={heat.points}
                   zoneLabel={zone}
