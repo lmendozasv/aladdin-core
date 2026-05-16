@@ -2024,9 +2024,9 @@ export default function MarketIntelligence() {
                 <Alert severity={kpis.marketScore >= 75 ? "success" : kpis.marketScore >= 62 ? "info" : "warning"} sx={{ mt: 2 }}>
                   {conclusion}
                 </Alert>
-                <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                {/* <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
                   Note: these numbers are UI placeholders; once Airbnb/Amadeus/Zillow/CRM are connected, they become real.
-                </Typography>
+                </Typography> */}
               </TabPanel>
             </CardContent>
           </Card>
